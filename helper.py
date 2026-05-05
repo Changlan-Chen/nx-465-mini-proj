@@ -218,3 +218,180 @@ def linear_fit(x, y):
     ss_tot = np.sum((y - y.mean()) ** 2)
     r_squared = 1.0 - ss_res / ss_tot
     return float(slope), float(intercept), float(r_squared)
+
+from scipy.ndimage import convolve
+
+
+def mexican_hat_2d(
+    x,
+    y,
+    A_exc=1.0,
+    sigma_exc=4.8,
+    A_inh=1.0,
+    sigma_inh=5.0,
+):
+    """2D Mexican-hat kernel for Exercise 2."""
+    x = np.asarray(x)
+    y = np.asarray(y)
+    r2 = x**2 + y**2
+    return A_exc * np.exp(-r2 / sigma_exc**2) - A_inh * np.exp(
+        -r2 / sigma_inh**2
+    )
+
+
+@dataclass(frozen=True)
+class Grid2DParams:
+    """Numerical and model parameters for Exercise 2."""
+
+    m: int = 40
+    tau_ms: float = 10.0
+    dt_ms: float = 1.0
+
+    A_exc: float = 1.0
+    sigma_exc: float = 4.8
+    A_inh: float = 1.0
+    sigma_inh: float = 5.0
+
+    B0: float = 1.0
+    alpha: float = 0.1
+    weight_shift: float = 1.0
+
+
+def centered_2d_coordinates(m):
+    """2D coordinate grid centered around zero."""
+    coords = np.arange(-m // 2, m // 2, dtype=float)
+    X, Y = np.meshgrid(coords, coords, indexing="xy")
+    return X, Y
+
+
+def shifted_kernels_2d(params):
+    """Shifted 2D kernels for North, South, East, and West populations."""
+    X, Y = centered_2d_coordinates(params.m)
+    l = params.weight_shift
+
+    W_N = mexican_hat_2d(
+        X,
+        Y - l,
+        params.A_exc,
+        params.sigma_exc,
+        params.A_inh,
+        params.sigma_inh,
+    )
+    W_S = mexican_hat_2d(
+        X,
+        Y + l,
+        params.A_exc,
+        params.sigma_exc,
+        params.A_inh,
+        params.sigma_inh,
+    )
+    W_E = mexican_hat_2d(
+        X - l,
+        Y,
+        params.A_exc,
+        params.sigma_exc,
+        params.A_inh,
+        params.sigma_inh,
+    )
+    W_W = mexican_hat_2d(
+        X + l,
+        Y,
+        params.A_exc,
+        params.sigma_exc,
+        params.A_inh,
+        params.sigma_inh,
+    )
+
+    return W_N, W_S, W_E, W_W
+
+
+def periodic_convolve2d(rate, weights):
+    """Fast periodic 2D convolution using FFT with centered kernel."""
+    kernel = np.fft.ifftshift(weights)
+    return np.fft.ifft2(np.fft.fft2(rate) * np.fft.fft2(kernel)).real
+
+
+class FourPopulationGridIntegrator:
+    """Four-population 2D continuous attractor model for grid cells."""
+
+    def __init__(self, params=None):
+        self.params = params or Grid2DParams()
+        self.W_N, self.W_S, self.W_E, self.W_W = shifted_kernels_2d(self.params)
+
+    def simulate(self, velocity, seed=0, initial_state=None, store_history=True):
+        """
+        Run forward Euler integration for a supplied 2D velocity trace.
+
+        velocity should have shape (n_steps, 2), where columns are vx and vy.
+        """
+        p = self.params
+        velocity = np.asarray(velocity, dtype=float)
+
+        if velocity.ndim != 2 or velocity.shape[1] != 2:
+            raise ValueError("velocity must have shape (n_steps, 2), with columns vx and vy")
+
+        rng = np.random.default_rng(seed)
+
+        if initial_state is None:
+            s_N = rng.uniform(0.0, 0.1, size=(p.m, p.m))
+            s_S = rng.uniform(0.0, 0.1, size=(p.m, p.m))
+            s_E = rng.uniform(0.0, 0.1, size=(p.m, p.m))
+            s_W = rng.uniform(0.0, 0.1, size=(p.m, p.m))
+        else:
+            s_N, s_S, s_E, s_W = (
+                np.array(arr, dtype=float, copy=True) for arr in initial_state
+            )
+
+        n_steps = len(velocity)
+
+        if store_history:
+            rate_total = np.zeros((n_steps, p.m, p.m))
+        else:
+            rate_total = None
+
+        for t, (vx_t, vy_t) in enumerate(velocity):
+            r_N = relu(s_N)
+            r_S = relu(s_S)
+            r_E = relu(s_E)
+            r_W = relu(s_W)
+
+            r_total_t = r_N + r_S + r_E + r_W
+
+            if store_history:
+                rate_total[t] = r_total_t
+
+            recurrent = (
+                periodic_convolve2d(r_N, self.W_N)
+                + periodic_convolve2d(r_S, self.W_S)
+                + periodic_convolve2d(r_E, self.W_E)
+                + periodic_convolve2d(r_W, self.W_W)
+            )
+
+            B_N = p.B0 * (1.0 + p.alpha * vy_t)
+            B_S = p.B0 * (1.0 - p.alpha * vy_t)
+            B_E = p.B0 * (1.0 + p.alpha * vx_t)
+            B_W = p.B0 * (1.0 - p.alpha * vx_t)
+
+            s_N += (p.dt_ms / p.tau_ms) * (-s_N + recurrent + B_N)
+            s_S += (p.dt_ms / p.tau_ms) * (-s_S + recurrent + B_S)
+            s_E += (p.dt_ms / p.tau_ms) * (-s_E + recurrent + B_E)
+            s_W += (p.dt_ms / p.tau_ms) * (-s_W + recurrent + B_W)
+
+        r_N = relu(s_N)
+        r_S = relu(s_S)
+        r_E = relu(s_E)
+        r_W = relu(s_W)
+        final_rate_total = r_N + r_S + r_E + r_W
+
+        return {
+            "velocity": velocity,
+            "rate_total": rate_total,
+            "final_rate_total": final_rate_total,
+            "final_rates": {
+                "N": r_N,
+                "S": r_S,
+                "E": r_E,
+                "W": r_W,
+            },
+            "final_state": (s_N, s_S, s_E, s_W),
+        }

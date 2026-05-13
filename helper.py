@@ -395,3 +395,174 @@ class FourPopulationGridIntegrator:
             },
             "final_state": (s_N, s_S, s_E, s_W),
         }
+
+# ex3
+from dataclasses import replace
+from scipy.ndimage import convolve
+
+
+def aperiodic_convolve2d(rate, weights):
+    """
+    Aperiodic 2D convolution: outside the sheet is treated as zero.
+    This implements the non-wrapping boundary condition for Exercise 3.
+    """
+    return convolve(rate, weights, mode="constant", cval=0.0)
+
+
+def radial_envelope(m, gamma=0.08, fratio=0.2):
+    """
+    Radial masking envelope for Exercise 3.
+
+    e(x) = exp(-gamma^2 * max(0, |x| - Rfade)^2)
+    where Rfade = fratio * M/2.
+    """
+    X, Y = centered_2d_coordinates(m)
+    radius = np.sqrt(X**2 + Y**2)
+    Rfade = fratio * m / 2.0
+    envelope = np.exp(-(gamma**2) * np.maximum(0.0, radius - Rfade) ** 2)
+    return envelope
+
+
+class AperiodicGridIntegrator(FourPopulationGridIntegrator):
+    """
+    Exercise 3 version of the 2D grid-cell model.
+
+    boundary_mode:
+        "none"          -> Ex 3.1, pure aperiodic boundary
+        "rate_envelope" -> Ex 3.3, attenuate outgoing weights / firing rates
+        "input_envelope"-> Ex 3.4, attenuate position-dependent inputs
+    """
+
+    def __init__(self, params=None, boundary_mode="none", gamma=0.08, fratio=0.2):
+        params = params or Grid2DParams(m=50)
+        super().__init__(params)
+
+        self.boundary_mode = boundary_mode
+        self.envelope = radial_envelope(params.m, gamma=gamma, fratio=fratio)
+
+    def simulate(self, velocity, seed=0, initial_state=None, store_history=True):
+        p = self.params
+        velocity = np.asarray(velocity, dtype=float)
+
+        if velocity.ndim != 2 or velocity.shape[1] != 2:
+            raise ValueError("velocity must have shape (n_steps, 2), with columns vx and vy")
+
+        rng = np.random.default_rng(seed)
+
+        if initial_state is None:
+            s_N = rng.uniform(0.0, 0.1, size=(p.m, p.m))
+            s_S = rng.uniform(0.0, 0.1, size=(p.m, p.m))
+            s_E = rng.uniform(0.0, 0.1, size=(p.m, p.m))
+            s_W = rng.uniform(0.0, 0.1, size=(p.m, p.m))
+        else:
+            s_N, s_S, s_E, s_W = (
+                np.array(arr, dtype=float, copy=True) for arr in initial_state
+            )
+
+        n_steps = len(velocity)
+
+        if store_history:
+            rate_total = np.zeros((n_steps, p.m, p.m))
+        else:
+            rate_total = None
+
+        for t, (vx_t, vy_t) in enumerate(velocity):
+            r_N = relu(s_N)
+            r_S = relu(s_S)
+            r_E = relu(s_E)
+            r_W = relu(s_W)
+
+            r_total_t = r_N + r_S + r_E + r_W
+
+            if store_history:
+                rate_total[t] = r_total_t
+
+            # Ex 3.3: attenuate outgoing influence by scaling firing rates
+            if self.boundary_mode == "rate_envelope":
+                r_N_conv = r_N * self.envelope
+                r_S_conv = r_S * self.envelope
+                r_E_conv = r_E * self.envelope
+                r_W_conv = r_W * self.envelope
+            else:
+                r_N_conv = r_N
+                r_S_conv = r_S
+                r_E_conv = r_E
+                r_W_conv = r_W
+
+            recurrent = (
+                aperiodic_convolve2d(r_N_conv, self.W_N)
+                + aperiodic_convolve2d(r_S_conv, self.W_S)
+                + aperiodic_convolve2d(r_E_conv, self.W_E)
+                + aperiodic_convolve2d(r_W_conv, self.W_W)
+            )
+
+            B_N = p.B0 * (1.0 + p.alpha * vy_t)
+            B_S = p.B0 * (1.0 - p.alpha * vy_t)
+            B_E = p.B0 * (1.0 + p.alpha * vx_t)
+            B_W = p.B0 * (1.0 - p.alpha * vx_t)
+
+            # Ex 3.4: make the input position-dependent
+            if self.boundary_mode == "input_envelope":
+                B_N = B_N * self.envelope
+                B_S = B_S * self.envelope
+                B_E = B_E * self.envelope
+                B_W = B_W * self.envelope
+
+            s_N += (p.dt_ms / p.tau_ms) * (-s_N + recurrent + B_N)
+            s_S += (p.dt_ms / p.tau_ms) * (-s_S + recurrent + B_S)
+            s_E += (p.dt_ms / p.tau_ms) * (-s_E + recurrent + B_E)
+            s_W += (p.dt_ms / p.tau_ms) * (-s_W + recurrent + B_W)
+
+        r_N = relu(s_N)
+        r_S = relu(s_S)
+        r_E = relu(s_E)
+        r_W = relu(s_W)
+        final_rate_total = r_N + r_S + r_E + r_W
+
+        return {
+            "velocity": velocity,
+            "rate_total": rate_total,
+            "final_rate_total": final_rate_total,
+            "final_rates": {
+                "N": r_N,
+                "S": r_S,
+                "E": r_E,
+                "W": r_W,
+            },
+            "final_state": (s_N, s_S, s_E, s_W),
+            "envelope": self.envelope,
+            "boundary_mode": self.boundary_mode,
+        }
+
+def stepwise_direction_velocity(
+    warmup_steps=400,
+    n_segments=12,
+    segment_steps=150,
+    speed=1.5,
+    seed=0,
+):
+    """
+    Fixed speed, step-wise changing direction.
+    velocity shape: (T, 2), columns are vx, vy.
+    """
+    rng = np.random.default_rng(seed)
+
+    # random directions
+    angles = rng.uniform(0, 2 * np.pi, size=n_segments)
+
+    vx = speed * np.cos(angles)
+    vy = speed * np.sin(angles)
+
+    moving_velocity = np.repeat(
+        np.stack([vx, vy], axis=1),
+        segment_steps,
+        axis=0,
+    )
+
+    warmup_velocity = np.zeros((warmup_steps, 2))
+
+    velocity = np.vstack([warmup_velocity, moving_velocity])
+
+    segment_starts = warmup_steps + np.arange(n_segments) * segment_steps
+
+    return velocity, angles, segment_starts

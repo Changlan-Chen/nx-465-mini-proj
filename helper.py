@@ -15,8 +15,6 @@ def mexican_hat_1d(
     A_inh=0.2,
     sigma_inh=10.0,
 ):
-    """1D Mexican-hat kernel from Exercise 0."""
-
     x = np.asarray(x)
     return A_exc * np.exp(-(x**2) / sigma_exc**2) - A_inh * np.exp(
         -(x**2) / sigma_inh**2
@@ -24,15 +22,11 @@ def mexican_hat_1d(
 
 
 def relu(x):
-    """Rectified firing-rate nonlinearity."""
-
     return np.maximum(0, x)
 
 
 @dataclass(frozen=True)
 class IntegratorParams:
-    """Numerical and model parameters for Exercise 1."""
-
     m: int = 100
     tau_ms: float = 10.0
     dt_ms: float = 1.0
@@ -46,15 +40,11 @@ class IntegratorParams:
 
 
 def circular_distances(m):
-    """Signed circular distances for a ring with m neurons."""
-
     distances = np.arange(m, dtype=float)
     return np.where(distances <= m / 2, distances, distances - m)
 
 
 def shifted_kernels(params):
-    """Kernels from the right- and left-shifting populations."""
-
     d = circular_distances(params.m)
     W_right = mexican_hat_1d(
         d - params.weight_shift,
@@ -74,21 +64,18 @@ def shifted_kernels(params):
 
 
 def periodic_convolve1d(rate, weights):
-    """Periodic 1D convolution using scipy.ndimage.convolve1d."""
-
-    return convolve1d(rate, weights, mode="wrap")
+    # return convolve1d(rate, weights, mode="wrap")
+    # The kernel is indexed by circular distance with zero distance at index 0,
+    # so we shift the convolution origin to align W(0) with the current neuron.
+    return convolve1d(rate, weights, mode="wrap", origin=-(len(weights) // 2))
 
 
 class TwoPopulationVelocityIntegrator:
-    """Two-population ring attractor with velocity-modulated inputs."""
-
     def __init__(self, params=None):
         self.params = params or IntegratorParams()
         self.W_right, self.W_left = shifted_kernels(self.params)
 
     def simulate(self, velocity, seed=0, initial_state=None):
-        """Run forward Euler integration for a supplied velocity trace."""
-
         p = self.params
         velocity = np.asarray(velocity, dtype=float)
         rng = np.random.default_rng(seed)
@@ -142,16 +129,12 @@ def step_velocity_protocol(
     moving_end=700,
     velocity_value=1.0,
 ):
-    """Velocity protocol for Exercise 1.1."""
-
     velocity = np.zeros(total_steps, dtype=float)
     velocity[moving_start:moving_end] = velocity_value
     return velocity
 
 
 def sampled_velocity_protocol(seed=7, n_velocities=10, segment_steps=300, warmup_steps=300):
-    """Sample velocities from [-2, -0.5] union [0.5, 2]."""
-
     rng = np.random.default_rng(seed)
     signs = np.array([-1.0] * (n_velocities // 2) + [1.0] * (n_velocities - n_velocities // 2))
     rng.shuffle(signs)
@@ -164,8 +147,6 @@ def sampled_velocity_protocol(seed=7, n_velocities=10, segment_steps=300, warmup
 
 
 def dominant_spatial_frequency(activity, window=None):
-    """Find the strongest non-zero Fourier mode in a stable activity pattern."""
-
     data = activity if window is None else activity[window]
     template = data.mean(axis=0)
     spectrum = np.fft.rfft(template - template.mean())
@@ -173,8 +154,6 @@ def dominant_spatial_frequency(activity, window=None):
 
 
 def fourier_bump_position(activity, k=None):
-    """Track bump phase as a continuous position in neuron-index units."""
-
     activity = np.asarray(activity, dtype=float)
     _, m = activity.shape
     if k is None:
@@ -197,8 +176,6 @@ def estimate_segment_velocities(
     discard_steps=50,
     dt_ms=1.0,
 ):
-    """Estimate bump velocity in each segment by linear regression."""
-
     estimates = []
     time = np.arange(len(position)) * dt_ms
     for start in segment_starts:
@@ -210,8 +187,6 @@ def estimate_segment_velocities(
 
 
 def linear_fit(x, y):
-    """Return slope, intercept, and R^2 for y = slope*x + intercept."""
-
     slope, intercept = np.polyfit(x, y, deg=1)
     prediction = slope * x + intercept
     ss_res = np.sum((y - prediction) ** 2)
@@ -230,7 +205,6 @@ def mexican_hat_2d(
     A_inh=1.0,
     sigma_inh=5.0,
 ):
-    """2D Mexican-hat kernel for Exercise 2."""
     x = np.asarray(x)
     y = np.asarray(y)
     r2 = x**2 + y**2
@@ -241,8 +215,6 @@ def mexican_hat_2d(
 
 @dataclass(frozen=True)
 class Grid2DParams:
-    """Numerical and model parameters for Exercise 2."""
-
     m: int = 40
     tau_ms: float = 10.0
     dt_ms: float = 1.0
@@ -258,14 +230,12 @@ class Grid2DParams:
 
 
 def centered_2d_coordinates(m):
-    """2D coordinate grid centered around zero."""
     coords = np.arange(-m // 2, m // 2, dtype=float)
     X, Y = np.meshgrid(coords, coords, indexing="xy")
     return X, Y
 
 
 def shifted_kernels_2d(params):
-    """Shifted 2D kernels for North, South, East, and West populations."""
     X, Y = centered_2d_coordinates(params.m)
     l = params.weight_shift
 
@@ -306,24 +276,16 @@ def shifted_kernels_2d(params):
 
 
 def periodic_convolve2d(rate, weights):
-    """Fast periodic 2D convolution using FFT with centered kernel."""
     kernel = np.fft.ifftshift(weights)
     return np.fft.ifft2(np.fft.fft2(rate) * np.fft.fft2(kernel)).real
 
 
 class FourPopulationGridIntegrator:
-    """Four-population 2D continuous attractor model for grid cells."""
-
     def __init__(self, params=None):
         self.params = params or Grid2DParams()
         self.W_N, self.W_S, self.W_E, self.W_W = shifted_kernels_2d(self.params)
 
     def simulate(self, velocity, seed=0, initial_state=None, store_history=True):
-        """
-        Run forward Euler integration for a supplied 2D velocity trace.
-
-        velocity should have shape (n_steps, 2), where columns are vx and vy.
-        """
         p = self.params
         velocity = np.asarray(velocity, dtype=float)
 
@@ -402,20 +364,10 @@ from scipy.ndimage import convolve
 
 
 def aperiodic_convolve2d(rate, weights):
-    """
-    Aperiodic 2D convolution: outside the sheet is treated as zero.
-    This implements the non-wrapping boundary condition for Exercise 3.
-    """
     return convolve(rate, weights, mode="constant", cval=0.0)
 
 
 def radial_envelope(m, gamma=0.08, fratio=0.2):
-    """
-    Radial masking envelope for Exercise 3.
-
-    e(x) = exp(-gamma^2 * max(0, |x| - Rfade)^2)
-    where Rfade = fratio * M/2.
-    """
     X, Y = centered_2d_coordinates(m)
     radius = np.sqrt(X**2 + Y**2)
     Rfade = fratio * m / 2.0
@@ -424,15 +376,7 @@ def radial_envelope(m, gamma=0.08, fratio=0.2):
 
 
 class AperiodicGridIntegrator(FourPopulationGridIntegrator):
-    """
-    Exercise 3 version of the 2D grid-cell model.
-
-    boundary_mode:
-        "none"          -> Ex 3.1, pure aperiodic boundary
-        "rate_envelope" -> Ex 3.3, attenuate outgoing weights / firing rates
-        "input_envelope"-> Ex 3.4, attenuate position-dependent inputs
-    """
-
+    
     def __init__(self, params=None, boundary_mode="none", gamma=0.08, fratio=0.2):
         params = params or Grid2DParams(m=50)
         super().__init__(params)
@@ -541,10 +485,6 @@ def stepwise_direction_velocity(
     speed=1.5,
     seed=0,
 ):
-    """
-    Fixed speed, step-wise changing direction.
-    velocity shape: (T, 2), columns are vx, vy.
-    """
     rng = np.random.default_rng(seed)
 
     # random directions
